@@ -13,6 +13,7 @@ import tqdm
 
 from modules.model import *
 from modules.interpolator import InterpolateSparse2d
+from modules.keypoint_allocator import KeypointAllocator, AdaptiveKeypointAllocator, SceneStatisticsComputer, TextureAwareParamGenerator
 
 class XFeat(nn.Module):
 	""" 
@@ -20,12 +21,17 @@ class XFeat(nn.Module):
 		It supports inference for both sparse and semi-dense feature extraction & matching.
 	"""
 
-	def __init__(self, weights = os.path.abspath(os.path.dirname(__file__)) + '/../weights/xfeat.pt', top_k = 4096, detection_threshold=0.05):
+	def __init__(self, weights = os.path.abspath(os.path.dirname(__file__)) + '/../weights/xfeat.pt', top_k = 4096, detection_threshold=0.05, adaptive_scene=True):
 		super().__init__()
 		self.dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 		self.net = XFeatModel().to(self.dev).eval()
 		self.top_k = top_k
 		self.detection_threshold = detection_threshold
+		self.adaptive_scene = adaptive_scene
+		if adaptive_scene:
+			self.keypoint_allocator = AdaptiveKeypointAllocator(debug=True)
+		else:
+			self.keypoint_allocator = KeypointAllocator()
 
 		if weights is not None:
 			if isinstance(weights, str):
@@ -79,26 +85,49 @@ class XFeat(nn.Module):
 		scores = (_nearest(K1h, mkpts, _H1, _W1) * _bilinear(H1, mkpts, _H1, _W1)).squeeze(-1)
 		scores[torch.all(mkpts == 0, dim=-1)] = -1
 
-		#Select top-k features
-		idxs = torch.argsort(-scores)
-		mkpts_x  = torch.gather(mkpts[...,0], -1, idxs)[:, :top_k]
-		mkpts_y  = torch.gather(mkpts[...,1], -1, idxs)[:, :top_k]
-		mkpts = torch.cat([mkpts_x[...,None], mkpts_y[...,None]], dim=-1)
-		scores = torch.gather(scores, -1, idxs)[:, :top_k]
+		#Use KeypointAllocator for spatially-aware selection
+		H1_norm = self.keypoint_allocator.normalize_scores(H1)
+
+		selected_mkpts = []
+		selected_scores = []
+		for b in range(B):
+			idxs_b = self.keypoint_allocator.select_sparse_single(
+				H1_norm[b, 0], mkpts[b], scores[b], top_k
+			)
+			if idxs_b.numel() > 0:
+				selected_mkpts.append(mkpts[b, idxs_b])
+				selected_scores.append(scores[b, idxs_b])
+			else:
+				selected_mkpts.append(torch.empty((0, 2), device=mkpts.device, dtype=mkpts.dtype))
+				selected_scores.append(torch.empty((0,), device=scores.device, dtype=scores.dtype))
+
+		max_len = max(s.shape[0] for s in selected_mkpts)
+		if max_len == 0:
+			return [{'keypoints': torch.empty((0, 2), device=mkpts.device, dtype=mkpts.dtype),
+					 'scores': torch.empty((0,), device=scores.device, dtype=scores.dtype),
+					 'descriptors': torch.empty((0, 64), device=M1.device, dtype=M1.dtype)} for b in range(B)]
+
+		pad_mkpts = torch.zeros((B, max_len, 2), device=mkpts.device, dtype=mkpts.dtype)
+		pad_scores = torch.full((B, max_len), -1.0, device=scores.device, dtype=scores.dtype)
+		for b in range(B):
+			n = selected_mkpts[b].shape[0]
+			if n > 0:
+				pad_mkpts[b, :n] = selected_mkpts[b]
+				pad_scores[b, :n] = selected_scores[b]
 
 		#Interpolate descriptors at kpts positions
-		feats = self.interpolator(M1, mkpts, H = _H1, W = _W1)
+		feats = self.interpolator(M1, pad_mkpts, H = _H1, W = _W1)
 
 		#L2-Normalize
 		feats = F.normalize(feats, dim=-1)
 
 		#Correct kpt scale
-		mkpts = mkpts * torch.tensor([rw1,rh1], device=mkpts.device).view(1, 1, -1)
+		pad_mkpts = pad_mkpts * torch.tensor([rw1,rh1], device=pad_mkpts.device).view(1, 1, -1)
 
-		valid = scores > 0
+		valid = pad_scores > 0
 		return [  
-				   {'keypoints': mkpts[b][valid[b]],
-					'scores': scores[b][valid[b]],
+				   {'keypoints': pad_mkpts[b][valid[b]],
+					'scores': pad_scores[b][valid[b]],
 					'descriptors': feats[b][valid[b]]} for b in range(B) 
 			   ]
 
@@ -366,17 +395,24 @@ class XFeat(nn.Module):
 		xy1 = (self.create_xy(_H1, _W1, M1.device) * 8).expand(B,-1,-1)
 
 		M1 = M1.permute(0,2,3,1).reshape(B, -1, C)
-		H1 = H1.permute(0,2,3,1).reshape(B, -1)
+		topk_idx = self.keypoint_allocator.select_topk(H1[:,0], top_k = top_k)
 
-		_, top_k = torch.topk(H1, k = min(len(H1[0]), top_k), dim=-1)
-
-		feats = torch.gather( M1, 1, top_k[...,None].expand(-1, -1, 64))
-		mkpts = torch.gather(xy1, 1, top_k[...,None].expand(-1, -1, 2))
+		feats = torch.gather( M1, 1, topk_idx[...,None].expand(-1, -1, 64))
+		mkpts = torch.gather(xy1, 1, topk_idx[...,None].expand(-1, -1, 2))
 		mkpts = mkpts * torch.tensor([rw1, rh1], device=mkpts.device).view(1,-1)
 
 		return mkpts, feats
 
 	def extract_dualscale(self, x, top_k, s1 = 0.6, s2 = 1.3):
+		"""
+			BETA-K dualscale extraction.
+			Each scale independently calls extractDense which applies its own
+			per-scale gamma cap (cap_global = ceil(gamma * scale_K)).
+			Since scale_K1 + scale_K2 = top_k, the total cap for any spatial
+			region across both scales is bounded by:
+			  ceil(gamma * 0.2*K) + ceil(gamma * 0.8*K) ≈ gamma * K
+			This preserves the global spatial density constraint.
+		"""
 		x1 = F.interpolate(x, scale_factor=s1, align_corners=False, mode='bilinear')
 		x2 = F.interpolate(x, scale_factor=s2, align_corners=False, mode='bilinear')
 

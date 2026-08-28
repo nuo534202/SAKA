@@ -19,6 +19,8 @@ import pdb
 
 dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+from modules.keypoint_allocator import KeypointAllocator, AdaptiveKeypointAllocator
+
 configs = {
     'alike-t': {'c1': 8, 'c2': 16, 'c3': 32, 'c4': 64, 'dim': 64, 'single_head': True, 'radius': 2,
                 'model_path': os.path.join(ALIKE_PATH, 'models', 'alike-t.pth')},
@@ -30,11 +32,15 @@ configs = {
                 'model_path': os.path.join(ALIKE_PATH, 'models', 'alike-l.pth')},
 }
 
+USE_ADAPTIVE_ALLOCATOR = True
+allocator = AdaptiveKeypointAllocator(debug=True) if USE_ADAPTIVE_ALLOCATOR else KeypointAllocator()
+
 model = ALike(**configs['alike-t'],
                 device=dev,
                 top_k=4096,
                 scores_th=0.1,
-                n_limit=8000)
+                n_limit=8000,
+                keypoint_allocator=allocator)
 
 def extract_alike_kpts(img):
     pred0 = model(img, sub_pixel=True)
@@ -44,7 +50,19 @@ def detectAndCompute(img, top_k = 4096):
 
     img = (img[0].permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
 
-    pred0 = model(img, sub_pixel=True)
+    old_model_top_k = model.top_k
+    old_dkd_top_k = model.dkd.top_k
+
+    try:
+        model.top_k = int(top_k)
+        model.dkd.top_k = int(top_k)
+
+        pred0 = model(img, sub_pixel=True)
+
+    finally:
+        model.top_k = old_model_top_k
+        model.dkd.top_k = old_dkd_top_k
+
     return (torch.tensor(pred0['keypoints'], dtype=torch.float32), 
             torch.tensor(pred0['scores'], dtype=torch.float32), 
             torch.tensor(pred0['descriptors'], dtype = torch.float32)

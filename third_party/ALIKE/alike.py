@@ -33,7 +33,8 @@ class ALike(ALNet):
                  top_k: int = 500, scores_th: float = 0.5,
                  n_limit: int = 5000,
                  device: str = 'cpu',
-                 model_path: str = ''
+                 model_path: str = '',
+                 keypoint_allocator = None,
                  ):
         super().__init__(c1, c2, c3, c4, dim, single_head)
         self.radius = radius
@@ -41,7 +42,8 @@ class ALike(ALNet):
         self.n_limit = n_limit
         self.scores_th = scores_th
         self.dkd = DKD(radius=self.radius, top_k=self.top_k,
-                       scores_th=self.scores_th, n_limit=self.n_limit)
+                       scores_th=self.scores_th, n_limit=self.n_limit,
+                       keypoint_allocator=keypoint_allocator)
         self.device = device
 
         if model_path != '':

@@ -64,7 +64,7 @@ def sample_descriptor(descriptor_map, kpts, bilinear_interp=False):
 
 
 class DKD(nn.Module):
-    def __init__(self, radius=2, top_k=0, scores_th=0.2, n_limit=20000):
+    def __init__(self, radius=2, top_k=0, scores_th=0.2, n_limit=20000, keypoint_allocator=None):
         """
         Args:
             radius: soft detection radius, kernel size is (2 * radius + 1)
@@ -72,12 +72,14 @@ class DKD(nn.Module):
             scores_th: top_k <= 0 threshold mode:  scores_th > 0: return keypoints with scores>scores_th
                                                    else: return keypoints with scores > scores.mean()
             n_limit: max number of keypoint in threshold mode
+            keypoint_allocator: optional KeypointAllocator for BETA-K spatial allocation
         """
         super().__init__()
         self.radius = radius
         self.top_k = top_k
         self.scores_th = scores_th
         self.n_limit = n_limit
+        self.keypoint_allocator = keypoint_allocator
         self.kernel_size = 2 * self.radius + 1
         self.temperature = 0.1  # tuned temperature
         self.unfold = nn.Unfold(kernel_size=self.kernel_size, padding=self.radius)
@@ -101,8 +103,35 @@ class DKD(nn.Module):
 
         # detect keypoints without grad
         if self.top_k > 0:
-            topk = torch.topk(nms_scores.view(b, -1), self.top_k)
-            indices_keypoints = topk.indices  # B x top_k
+            if self.keypoint_allocator is not None:
+                reliability_map = F.avg_pool2d(scores_map, kernel_size=8, stride=8)
+
+                indices_keypoints = []
+                for b_idx in range(b):
+                    nms_b = nms_scores[b_idx, 0]
+                    candidate_mask = nms_b > 0
+                    cand_indices = torch.where(candidate_mask.reshape(-1))[0]
+
+                    if cand_indices.numel() == 0:
+                        indices_keypoints.append(torch.empty(0, device=scores_map.device, dtype=torch.long))
+                        continue
+
+                    cand_y = cand_indices // w
+                    cand_x = cand_indices % w
+                    mkpts_b = torch.stack([cand_x, cand_y], dim=-1).float()
+                    scores_b = nms_b.reshape(-1)[cand_indices]
+
+                    sel = self.keypoint_allocator.select_sparse_single(
+                        reliability_map[b_idx, 0], mkpts_b, scores_b, self.top_k
+                    )
+
+                    if sel.numel() > 0:
+                        indices_keypoints.append(cand_indices[sel])
+                    else:
+                        indices_keypoints.append(torch.empty(0, device=scores_map.device, dtype=torch.long))
+            else:
+                topk = torch.topk(nms_scores.view(b, -1), self.top_k)
+                indices_keypoints = topk.indices  # B x top_k
         else:
             if self.scores_th > 0:
                 masks = nms_scores > self.scores_th
