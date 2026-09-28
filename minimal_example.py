@@ -1,9 +1,4 @@
-"""
-	"XFeat: Accelerated Features for Lightweight Image Matching, CVPR 2024."
-	https://www.verlab.dcc.ufmg.br/descriptors/xfeat_cvpr24/
-
-    Minimal example of how to use XFeat.
-"""
+"""Minimal SAKA-enabled XFeat inference and matching example."""
 
 import numpy as np
 import os
