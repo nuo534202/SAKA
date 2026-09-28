@@ -1,7 +1,9 @@
-# SAKA: Spatially Aware Keypoint Allocation for Lightweight Image Matching
+<h1 align="center">SAKA: Spatially Aware Keypoint Allocation for Lightweight Image Matching</h1>
 
-**Haoran Zhao · Leyan Chen · Haokai Wen · Wentao Cheng**<br>
-Faculty of Science and Technology, Beijing Normal-Hong Kong Baptist University, Zhuhai, China
+<p align="center">
+  <strong>Haoran Zhao · Leyan Chen · Haokai Wen · Wentao Cheng</strong><br>
+  Faculty of Science and Technology, Beijing Normal-Hong Kong Baptist University, Zhuhai, China
+</p>
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
