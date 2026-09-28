@@ -5,7 +5,10 @@
   Faculty of Science and Technology, Beijing Normal-Hong Kong Baptist University, Zhuhai, China
 </p>
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+<div align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+  <a href="https://www.nuo534202.cn/SAKA-Page/"><img src="https://img.shields.io/badge/Project-Page-blue.svg" alt="Project Page"></a>
+</div>
 
 SAKA is a training-free replacement for global Top-K keypoint selection. It keeps strong candidates while distributing a fixed budget across useful image regions. SAKA changes only selection: detector weights, descriptors, matching, and geometric verification stay unchanged.
 
